@@ -278,6 +278,21 @@ public final class Http2Test {
     assertEquals(settingValue.intValue(), 1);
   }
 
+  @Test public void readSettingsFrameExperimentalId() throws IOException {
+    writeMedium(frame, 6); // 2 for the code and 4 for the value
+    frame.writeByte(Http2.TYPE_SETTINGS);
+    frame.writeByte(Http2.FLAG_NONE);
+    frame.writeInt(0); // Settings are always on the connection stream 0.
+    frame.write(ByteString.decodeHex("f000")); // Id reserved for experimental use.
+    frame.writeInt(1);
+
+    reader.nextFrame(false, new BaseTestHandler() {
+      @Override public void settings(boolean clearPrevious, Settings settings) {
+        // no-op
+      }
+    });
+  }
+
   @Test public void readSettingsFrameNegativeWindowSize() throws IOException {
     writeMedium(frame, 6); // 2 for the code and 4 for the value
     frame.writeByte(Http2.TYPE_SETTINGS);
@@ -390,6 +405,23 @@ public final class Http2Test {
         }
       }
     });
+  }
+
+  @Test public void dataFrameNotAssociateWithStream() throws IOException {
+    byte[] payload = new byte[] {0x01, 0x02};
+
+    writeMedium(frame, payload.length);
+    frame.writeByte(Http2.TYPE_DATA);
+    frame.writeByte(Http2.FLAG_NONE);
+    frame.writeInt(0);
+    frame.write(payload);
+
+    try {
+      reader.nextFrame(false, new BaseTestHandler());
+      fail();
+    } catch (IOException e) {
+      assertEquals("PROTOCOL_ERROR: TYPE_DATA streamId == 0", e.getMessage());
+    }
   }
 
   /** We do not send SETTINGS_COMPRESS_DATA = 1, nor want to. Let's make sure we error. */

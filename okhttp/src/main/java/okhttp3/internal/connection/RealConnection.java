@@ -29,6 +29,7 @@ import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
+import javax.annotation.Nullable;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
@@ -44,6 +45,7 @@ import okhttp3.Protocol;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.Route;
+import okhttp3.internal.Internal;
 import okhttp3.internal.Util;
 import okhttp3.internal.Version;
 import okhttp3.internal.http.HttpCodec;
@@ -67,6 +69,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static okhttp3.internal.Util.closeQuietly;
 
 public final class RealConnection extends Http2Connection.Listener implements Connection {
+  private static final String NPE_THROW_WITH_NULL = "throw with null exception";
   private final ConnectionPool connectionPool;
   private final Route route;
 
@@ -223,8 +226,19 @@ public final class RealConnection extends Http2Connection.Listener implements Co
       ce.initCause(e);
       throw ce;
     }
-    source = Okio.buffer(Okio.source(rawSocket));
-    sink = Okio.buffer(Okio.sink(rawSocket));
+
+    // The following try/catch block is a pseudo hacky way to get around a crash on Android 7.0
+    // More details:
+    // https://github.com/square/okhttp/issues/3245
+    // https://android-review.googlesource.com/#/c/271775/
+    try {
+      source = Okio.buffer(Okio.source(rawSocket));
+      sink = Okio.buffer(Okio.sink(rawSocket));
+    } catch (NullPointerException npe) {
+      if (NPE_THROW_WITH_NULL.equals(npe.getMessage())) {
+        throw new IOException(npe);
+      }
+    }
   }
 
   private void establishProtocol(ConnectionSpecSelector connectionSpecSelector) throws IOException {
@@ -237,7 +251,7 @@ public final class RealConnection extends Http2Connection.Listener implements Co
     connectTls(connectionSpecSelector);
 
     if (protocol == Protocol.HTTP_2) {
-      socket.setSoTimeout(0); // Framed connection timeouts are set per-stream.
+      socket.setSoTimeout(0); // HTTP/2 connection timeouts are set per-stream.
       http2Connection = new Http2Connection.Builder(true)
           .socket(socket, route.address().url().host(), source, sink)
           .listener(this)
@@ -373,11 +387,64 @@ public final class RealConnection extends Http2Connection.Listener implements Co
         .build();
   }
 
-  /** Returns true if this connection can carry a stream allocation to {@code address}. */
-  public boolean isEligible(Address address) {
-    return allocations.size() < allocationLimit
-        && address.equals(route().address())
-        && !noNewStreams;
+  /**
+   * Returns true if this connection can carry a stream allocation to {@code address}. If non-null
+   * {@code route} is the resolved route for a connection.
+   */
+  public boolean isEligible(Address address, @Nullable Route route) {
+    // If this connection is not accepting new streams, we're done.
+    if (allocations.size() >= allocationLimit || noNewStreams) return false;
+
+    // If the non-host fields of the address don't overlap, we're done.
+    if (!Internal.instance.equalsNonHost(this.route.address(), address)) return false;
+
+    // If the host exactly matches, we're done: this connection can carry the address.
+    if (address.url().host().equals(this.route().address().url().host())) {
+      return true; // This connection is a perfect match.
+    }
+
+    // At this point we don't have a hostname match. But we still be able to carry the request if
+    // our connection coalescing requirements are met. See also:
+    // https://hpbn.co/optimizing-application-delivery/#eliminate-domain-sharding
+    // https://daniel.haxx.se/blog/2016/08/18/http2-connection-coalescing/
+
+    // 1. This connection must be HTTP/2.
+    if (http2Connection == null) return false;
+
+    // 2. The routes must share an IP address. This requires us to have a DNS address for both
+    // hosts, which only happens after route planning. We can't coalesce connections that use a
+    // proxy, since proxies don't tell us the origin server's IP address.
+    if (route == null) return false;
+    if (route.proxy().type() != Proxy.Type.DIRECT) return false;
+    if (this.route.proxy().type() != Proxy.Type.DIRECT) return false;
+    if (!this.route.socketAddress().equals(route.socketAddress())) return false;
+
+    // 3. This connection's server certificate's must cover the new host.
+    if (route.address().hostnameVerifier() != OkHostnameVerifier.INSTANCE) return false;
+    if (!supportsUrl(address.url())) return false;
+
+    // 4. Certificate pinning must match the host.
+    try {
+      address.certificatePinner().check(address.url().host(), handshake().peerCertificates());
+    } catch (SSLPeerUnverifiedException e) {
+      return false;
+    }
+
+    return true; // The caller's address can be carried by this connection.
+  }
+
+  public boolean supportsUrl(HttpUrl url) {
+    if (url.port() != route.address().url().port()) {
+      return false; // Port mismatch.
+    }
+
+    if (!url.host().equals(route.address().url().host())) {
+      // We have a host mismatch. But if the certificate matches, we're still good.
+      return handshake != null && OkHostnameVerifier.INSTANCE.verify(
+          url.host(), (X509Certificate) handshake.peerCertificates().get(0));
+    }
+
+    return true; // Success. The URL is supported.
   }
 
   public HttpCodec newCodec(
