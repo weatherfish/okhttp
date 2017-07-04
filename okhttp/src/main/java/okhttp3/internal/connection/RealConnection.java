@@ -34,12 +34,15 @@ import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 import okhttp3.Address;
+import okhttp3.Call;
 import okhttp3.CertificatePinner;
 import okhttp3.Connection;
 import okhttp3.ConnectionPool;
 import okhttp3.ConnectionSpec;
+import okhttp3.EventListener;
 import okhttp3.Handshake;
 import okhttp3.HttpUrl;
+import okhttp3.Interceptor;
 import okhttp3.OkHttpClient;
 import okhttp3.Protocol;
 import okhttp3.Request;
@@ -121,8 +124,8 @@ public final class RealConnection extends Http2Connection.Listener implements Co
     return result;
   }
 
-  public void connect(
-      int connectTimeout, int readTimeout, int writeTimeout, boolean connectionRetryEnabled) {
+  public void connect(int connectTimeout, int readTimeout, int writeTimeout,
+      boolean connectionRetryEnabled, Call call, EventListener eventListener) {
     if (protocol != null) throw new IllegalStateException("already connected");
 
     RouteException routeException = null;
@@ -148,7 +151,7 @@ public final class RealConnection extends Http2Connection.Listener implements Co
         } else {
           connectSocket(connectTimeout, readTimeout);
         }
-        establishProtocol(connectionSpecSelector);
+        establishProtocol(connectionSpecSelector, call, eventListener);
         break;
       } catch (IOException e) {
         closeQuietly(socket);
@@ -241,14 +244,22 @@ public final class RealConnection extends Http2Connection.Listener implements Co
     }
   }
 
-  private void establishProtocol(ConnectionSpecSelector connectionSpecSelector) throws IOException {
+  private void establishProtocol(ConnectionSpecSelector connectionSpecSelector, Call call,
+      EventListener eventListener) throws IOException {
     if (route.address().sslSocketFactory() == null) {
       protocol = Protocol.HTTP_1_1;
       socket = rawSocket;
       return;
     }
 
-    connectTls(connectionSpecSelector);
+    eventListener.secureConnectStart(call);
+    try {
+      connectTls(connectionSpecSelector);
+    } catch (Exception e) {
+      eventListener.secureConnectEnd(call, null, e);
+      throw e;
+    }
+    eventListener.secureConnectEnd(call, handshake, null);
 
     if (protocol == Protocol.HTTP_2) {
       socket.setSoTimeout(0); // HTTP/2 connection timeouts are set per-stream.
@@ -447,13 +458,13 @@ public final class RealConnection extends Http2Connection.Listener implements Co
     return true; // Success. The URL is supported.
   }
 
-  public HttpCodec newCodec(
-      OkHttpClient client, StreamAllocation streamAllocation) throws SocketException {
+  public HttpCodec newCodec(OkHttpClient client, Interceptor.Chain chain,
+      StreamAllocation streamAllocation) throws SocketException {
     if (http2Connection != null) {
-      return new Http2Codec(client, streamAllocation, http2Connection);
+      return new Http2Codec(client, chain, streamAllocation, http2Connection);
     } else {
-      socket.setSoTimeout(client.readTimeoutMillis());
-      source.timeout().timeout(client.readTimeoutMillis(), MILLISECONDS);
+      socket.setSoTimeout(chain.readTimeoutMillis());
+      source.timeout().timeout(chain.readTimeoutMillis(), MILLISECONDS);
       sink.timeout().timeout(client.writeTimeoutMillis(), MILLISECONDS);
       return new Http1Codec(client, streamAllocation, source, sink);
     }

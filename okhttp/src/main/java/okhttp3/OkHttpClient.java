@@ -49,6 +49,8 @@ import okhttp3.internal.tls.CertificateChainCleaner;
 import okhttp3.internal.tls.OkHostnameVerifier;
 import okhttp3.internal.ws.RealWebSocket;
 
+import static okhttp3.internal.Util.checkDuration;
+
 /**
  * Factory for {@linkplain Call calls}, which can be used to send HTTP requests and read their
  * responses.
@@ -186,7 +188,7 @@ public class OkHttpClient implements Cloneable, Call.Factory, WebSocket.Factory 
       }
 
       @Override public Call newWebSocketCall(OkHttpClient client, Request originalRequest) {
-        return new RealCall(client, originalRequest, true);
+        return RealCall.newRealCall(client, originalRequest, true);
       }
     };
   }
@@ -407,8 +409,7 @@ public class OkHttpClient implements Cloneable, Call.Factory, WebSocket.Factory 
     return networkInterceptors;
   }
 
-  // TODO(jwilson): make this public after the 3.8 release.
-  /*public*/ EventListener.Factory eventListenerFactory() {
+  public EventListener.Factory eventListenerFactory() {
     return eventListenerFactory;
   }
 
@@ -416,7 +417,7 @@ public class OkHttpClient implements Cloneable, Call.Factory, WebSocket.Factory 
    * Prepares the {@code request} to be executed at some point in the future.
    */
   @Override public Call newCall(Request request) {
-    return new RealCall(this, request, false /* for web socket */);
+    return RealCall.newRealCall(this, request, false /* for web socket */);
   }
 
   /**
@@ -553,15 +554,6 @@ public class OkHttpClient implements Cloneable, Call.Factory, WebSocket.Factory 
     public Builder pingInterval(long interval, TimeUnit unit) {
       pingInterval = checkDuration("interval", interval, unit);
       return this;
-    }
-
-    private static int checkDuration(String name, long duration, TimeUnit unit) {
-      if (duration < 0) throw new IllegalArgumentException(name + " < 0");
-      if (unit == null) throw new NullPointerException("unit == null");
-      long millis = unit.toMillis(duration);
-      if (millis > Integer.MAX_VALUE) throw new IllegalArgumentException(name + " too large.");
-      if (millis == 0 && duration > 0) throw new IllegalArgumentException(name + " too small.");
-      return (int) millis;
     }
 
     /**
@@ -887,15 +879,13 @@ public class OkHttpClient implements Cloneable, Call.Factory, WebSocket.Factory 
       return this;
     }
 
-    // TODO(jwilson): make this public after the 3.8 release.
-    /*public*/ Builder eventListener(EventListener eventListener) {
+    public Builder eventListener(EventListener eventListener) {
       if (eventListener == null) throw new NullPointerException("eventListener == null");
       this.eventListenerFactory = EventListener.factory(eventListener);
       return this;
     }
 
-    // TODO(jwilson): make this public after the 3.8 release.
-    /*public*/ Builder eventListenerFactory(EventListener.Factory eventListenerFactory) {
+    public Builder eventListenerFactory(EventListener.Factory eventListenerFactory) {
       if (eventListenerFactory == null) {
         throw new NullPointerException("eventListenerFactory == null");
       }
